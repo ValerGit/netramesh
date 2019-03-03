@@ -2,7 +2,7 @@ package main
 
 import (
 	"flag"
-	"log"
+	"io/ioutil"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -15,6 +15,7 @@ import (
 	jaegercfg "github.com/uber/jaeger-client-go/config"
 
 	"github.com/Lookyan/netramesh/pkg/estabcache"
+	"github.com/Lookyan/netramesh/pkg/log"
 	"github.com/Lookyan/netramesh/pkg/protocol"
 	"github.com/Lookyan/netramesh/pkg/transport"
 )
@@ -22,18 +23,20 @@ import (
 func main() {
 	serviceName := flag.String("service-name", "", "service name for jaeger")
 	flag.Parse()
+
+	logger := log.Init("NETRA", log.ErrorLevel,  ioutil.Discard)
 	if *serviceName == "" {
-		log.Fatal("service-name flag should be set")
+		logger.Fatal("service-name flag should be set")
 	}
 
 	go func() {
 		// pprof
-		log.Println(http.ListenAndServe("0.0.0.0:14957", nil))
+		logger.Infoln(http.ListenAndServe("0.0.0.0:14957", nil))
 	}()
 
 	go func() {
 		for {
-			log.Printf("Num of goroutines: %d", runtime.NumGoroutine())
+			logger.Infoln("Num of goroutines: %d", runtime.NumGoroutine())
 			time.Sleep(5 * time.Second)
 		}
 	}()
@@ -42,12 +45,12 @@ func main() {
 	cfg, err := jaegercfg.FromEnv()
 	if err != nil {
 		// parsing errors might happen here, such as when we get a string where we expect a number
-		log.Printf("Could not parse Jaeger env vars: %s", err.Error())
+		logger.Errorln("Could not parse Jaeger env vars: %s", err.Error())
 		return
 	}
 	tracer, closer, err := cfg.NewTracer()
 	if err != nil {
-		log.Printf("Could not initialize jaeger tracer: %s", err.Error())
+		logger.Infoln("Could not initialize jaeger tracer: %s", err.Error())
 		return
 	}
 	defer closer.Close()
@@ -58,12 +61,12 @@ func main() {
 	addr := "0.0.0.0:14956"
 	lAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
-		log.Fatal(err.Error())
+		logger.Fatal(err.Error())
 	}
 
 	ln, err := net.ListenTCP("tcp", lAddr)
 	if err != nil {
-		log.Fatal(err.Error())
+		logger.Fatal(err.Error())
 	}
 
 	establishedCache := estabcache.NewEstablishedCache()
@@ -79,7 +82,7 @@ func main() {
 	for {
 		conn, err := ln.AcceptTCP()
 		if err != nil {
-			log.Print(err.Error())
+			logger.Error(err.Error())
 			continue
 		}
 

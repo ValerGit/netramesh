@@ -4,11 +4,11 @@ import (
 	"bufio"
 	"container/list"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
 
+	"github.com/Lookyan/netramesh/pkg/log"
 	"github.com/google/uuid"
 	"github.com/opentracing/opentracing-go"
 	"github.com/patrickmn/go-cache"
@@ -17,11 +17,13 @@ import (
 
 type HTTPHandler struct {
 	tracingContextMapping *cache.Cache
+	logger                *log.Logger
 }
 
-func NewHTTPHandler(tracingContextMapping *cache.Cache) *HTTPHandler {
+func NewHTTPHandler(tracingContextMapping *cache.Cache, logger *log.Logger) *HTTPHandler {
 	return &HTTPHandler{
 		tracingContextMapping: tracingContextMapping,
+		logger:                logger,
 	}
 }
 
@@ -38,19 +40,19 @@ func (h *HTTPHandler) HandleRequest(r io.ReadCloser, w io.WriteCloser, netReques
 		tmpWriter.Start()
 		req, err := http.ReadRequest(bufioHTTPReader)
 		if err == io.EOF {
-			log.Print("EOF while parsing request HTTP")
+			h.logger.Error("EOF while parsing request HTTP")
 			return
 		}
 		if err != nil {
-			log.Printf("Error while parsing http request '%s'", err.Error())
+			h.logger.Debugf("Error while parsing http request '%s'", err.Error())
 			_, err = io.Copy(w, tmpWriter)
 			if err != nil {
-				log.Print(err.Error())
+				h.logger.Debug(err.Error())
 			}
 			tmpWriter.Stop()
 			_, err = io.Copy(w, bufioHTTPReader)
 			if err != nil {
-				log.Print(err.Error())
+				h.logger.Debug(err.Error())
 			}
 			return
 		}
@@ -58,12 +60,12 @@ func (h *HTTPHandler) HandleRequest(r io.ReadCloser, w io.WriteCloser, netReques
 		if strings.ToLower(req.Header.Get("Connection")) == "upgrade" {
 			_, err = io.Copy(w, tmpWriter)
 			if err != nil {
-				log.Print(err.Error())
+				h.logger.Debug(err.Error())
 			}
 			tmpWriter.Stop()
 			_, err = io.Copy(w, bufioHTTPReader)
 			if err != nil {
-				log.Print(err.Error())
+				h.logger.Debug(err.Error())
 			}
 			return
 		}
@@ -79,10 +81,10 @@ func (h *HTTPHandler) HandleRequest(r io.ReadCloser, w io.WriteCloser, netReques
 			// we need to generate context header and propagate it
 			tracingInfoByRequestID, ok := h.tracingContextMapping.Get(req.Header.Get("x-request-id"))
 			if ok {
-				log.Printf("Found request-id matching: %#v", tracingInfoByRequestID)
+				h.logger.Debugf("Found request-id matching: %#v", tracingInfoByRequestID)
 				tracingContext := tracingInfoByRequestID.(jaeger.SpanContext)
 				req.Header[jaeger.TraceContextHeaderName] = []string{tracingContext.String()}
-				log.Printf("Outbound span: %s", tracingContext.String())
+				h.logger.Debugf("Outbound span: %s", tracingContext.String())
 			}
 		}
 
@@ -92,7 +94,7 @@ func (h *HTTPHandler) HandleRequest(r io.ReadCloser, w io.WriteCloser, netReques
 		// write the same request to writer
 		err = req.Write(w)
 		if err != nil {
-			log.Printf("Error while writing request to w: %s", err.Error())
+			h.logger.Errorf("Error while writing request to w: %s", err.Error())
 		}
 	}
 }
@@ -110,20 +112,20 @@ func (h *HTTPHandler) HandleResponse(r io.ReadCloser, w io.WriteCloser, netReque
 		tmpWriter.Start()
 		resp, err := http.ReadResponse(bufioHTTPReader, nil)
 		if err == io.EOF {
-			log.Print("EOF while parsing response HTTP")
+			h.logger.Debugf("EOF while parsing request HTTP")
 			netHTTPRequest.StopRequest()
 			return
 		}
 		if err != nil {
-			log.Printf("Error while parsing http response: %s", err.Error())
+			h.logger.Debugf("Error while parsing http response: %s", err.Error())
 			_, err = io.Copy(w, tmpWriter)
 			if err != nil {
-				log.Print(err.Error())
+				h.logger.Debug(err.Error())
 			}
 			tmpWriter.Stop()
 			_, err = io.Copy(w, bufioHTTPReader)
 			if err != nil {
-				log.Print(err.Error())
+				h.logger.Debug(err.Error())
 			}
 			netHTTPRequest.StopRequest()
 			return
@@ -133,12 +135,12 @@ func (h *HTTPHandler) HandleResponse(r io.ReadCloser, w io.WriteCloser, netReque
 		if strings.ToLower(resp.Header.Get("Connection")) == "upgrade" {
 			_, err = io.Copy(w, tmpWriter)
 			if err != nil {
-				log.Print(err.Error())
+				h.logger.Debug(err.Error())
 			}
 			tmpWriter.Stop()
 			_, err = io.Copy(w, bufioHTTPReader)
 			if err != nil {
-				log.Print(err.Error())
+				h.logger.Debug(err.Error())
 			}
 			return
 		}
@@ -148,7 +150,7 @@ func (h *HTTPHandler) HandleResponse(r io.ReadCloser, w io.WriteCloser, netReque
 		// write the same response to w
 		err = resp.Write(w)
 		if err != nil {
-			log.Printf("Error while writing response to w: %s", err.Error())
+			h.logger.Errorf("Error while writing response to w: %s", err.Error())
 		}
 
 		netHTTPRequest.SetHTTPResponse(resp)
@@ -162,13 +164,15 @@ type NetHTTPRequest struct {
 	spans                 *Queue
 	isInbound             bool
 	tracingContextMapping *cache.Cache
+	logger                *log.Logger
 }
 
-func NewNetHTTPRequest() *NetHTTPRequest {
+func NewNetHTTPRequest(logger *log.Logger) *NetHTTPRequest {
 	return &NetHTTPRequest{
 		httpRequests:  NewQueue(),
 		httpResponses: NewQueue(),
 		spans:         NewQueue(),
+		logger:        logger,
 	}
 }
 
@@ -179,7 +183,7 @@ func (nr *NetHTTPRequest) StartRequest() {
 	}
 	httpRequest := request.(*http.Request)
 	carrier := opentracing.HTTPHeadersCarrier(httpRequest.Header)
-	log.Printf("Extraction header value: %s", httpRequest.Header.Get(jaeger.TraceContextHeaderName))
+	nr.logger.Debugf("Extraction header value: %s", httpRequest.Header.Get(jaeger.TraceContextHeaderName))
 	wireContext, err := opentracing.GlobalTracer().Extract(opentracing.HTTPHeaders, carrier)
 
 	operation := httpRequest.URL.Path
@@ -188,7 +192,7 @@ func (nr *NetHTTPRequest) StartRequest() {
 	}
 	var span opentracing.Span
 	if err != nil {
-		log.Printf("Carrier extract error: %s", err.Error())
+		nr.logger.Infof("Carrier extract error: %s", err.Error())
 		span = opentracing.StartSpan(
 			operation,
 		)
@@ -223,7 +227,7 @@ func (nr *NetHTTPRequest) StartRequest() {
 			)
 		}
 	} else {
-		log.Printf("Wirecontext: %#v", wireContext)
+		nr.logger.Infof("Wirecontext: %#v", wireContext)
 		if nr.isInbound {
 			context := wireContext.(jaeger.SpanContext)
 			nr.tracingContextMapping.SetDefault(
@@ -246,7 +250,7 @@ func (nr *NetHTTPRequest) StopRequest() {
 	if request != nil && response != nil {
 		httpRequest := request.(*http.Request)
 		httpResponse := response.(*http.Response)
-		log.Printf("Method: %s Host: %s",
+		nr.logger.Infoln("Method: %s Host: %s",
 			httpRequest.Method,
 			httpRequest.Host,
 		)
